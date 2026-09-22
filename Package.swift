@@ -386,6 +386,7 @@ let package = Package(
         "connections/implementation/mediums/ble/instant_on_lost_advertisement_test.cc",
         "connections/implementation/mediums/ble/instant_on_lost_manager_test.cc",
         "connections/implementation/mediums/ble_test.cc",
+        "connections/implementation/mediums/apple_unsupported_mediums_test.mm",
         "connections/implementation/mediums/bluetooth_bwu_handler_test.cc",
         "connections/implementation/mediums/bluetooth_classic_test.cc",
         "connections/implementation/mediums/bluetooth_radio_test.cc",

@@ -12,6 +12,71 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#if defined(__APPLE__)
+
+#include "connections/implementation/mediums/wifi_hotspot.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "absl/strings/string_view.h"
+#include "connections/implementation/bwu_handler.h"
+#include "internal/platform/cancellation_flag.h"
+#include "internal/platform/expected.h"
+#include "internal/platform/service_address.h"
+#include "internal/platform/wifi_credential.h"
+#include "internal/platform/wifi_hotspot.h"
+
+namespace nearby {
+namespace connections {
+
+WifiHotspot::~WifiHotspot() = default;
+
+bool WifiHotspot::IsAPAvailable() const { return false; }
+bool WifiHotspot::IsClientAvailable() const { return false; }
+bool WifiHotspot::IsHotspotStarted() { return false; }
+bool WifiHotspot::StartWifiHotspot() { return false; }
+bool WifiHotspot::StopWifiHotspot() { return false; }
+bool WifiHotspot::IsConnectedToHotspot() { return false; }
+bool WifiHotspot::ConnectWifiHotspot(
+    const HotspotCredentials& hotspot_credentials) {
+  return false;
+}
+bool WifiHotspot::DisconnectWifiHotspot() { return false; }
+bool WifiHotspot::StartAcceptingConnections(
+    const std::string& service_id, AcceptedConnectionCallback callback) {
+  return false;
+}
+bool WifiHotspot::StopAcceptingConnections(const std::string& service_id) {
+  return false;
+}
+bool WifiHotspot::IsAcceptingConnections(const std::string& service_id) {
+  return false;
+}
+
+ErrorOr<WifiHotspotSocket> WifiHotspot::Connect(
+    const std::string& service_id,
+    const std::vector<ServiceAddress>& service_addresses,
+    CancellationFlag* cancellation_flag) {
+  return WifiHotspotSocket();
+}
+
+HotspotCredentials* WifiHotspot::GetCredentials(absl::string_view service_id) {
+  return nullptr;
+}
+
+std::unique_ptr<BwuHandler> WifiHotspot::CreateBwuHandler(
+    BwuHandler::IncomingConnectionCallback incoming_connection_callback) {
+  return nullptr;
+}
+
+}  // namespace connections
+}  // namespace nearby
+
+#else
+
 #include "connections/implementation/mediums/wifi_hotspot.h"
 
 #include <cstdint>
@@ -338,3 +403,5 @@ std::unique_ptr<BwuHandler> WifiHotspot::CreateBwuHandler(
 
 }  // namespace connections
 }  // namespace nearby
+
+#endif  // defined(__APPLE__)

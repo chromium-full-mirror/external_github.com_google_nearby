@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#if !defined(__APPLE__)
+
 #include "connections/implementation/mediums/wifi_hotspot_bwu_handler.h"
 
 #if !defined(_WIN32)
@@ -264,3 +266,5 @@ void WifiHotspotBwuHandler::OnIncomingWifiHotspotConnection(
 
 }  // namespace connections
 }  // namespace nearby
+
+#endif  // !defined(__APPLE__)

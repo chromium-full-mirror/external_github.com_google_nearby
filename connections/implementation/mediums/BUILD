@@ -12,10 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+load("@rules_apple//apple:ios.bzl", "ios_unit_test")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("//third_party/nearby:minimum_os.bzl", "IOS_LATEST_TEST_RUNNER", "IOS_MINIMUM_OS")
 
 licenses(["notice"])
+
+config_setting(
+    name = "optimized_mode",
+    values = {"compilation_mode": "opt"},
+)
 
 cc_library(
     name = "mediums",
@@ -64,6 +72,10 @@ cc_library(
         "wifi_lan_bwu_handler.h",
         "wifi_lan_endpoint_channel.h",
     ],
+    copts = select({
+        ":optimized_mode": ["-Oz"],
+        "//conditions:default": [],
+    }),
     local_defines = select({
         "//:webrtc_enabled": [],
         "//conditions:default": ["NO_WEBRTC"],
@@ -293,5 +305,27 @@ cc_test(
         "@com_github_protobuf_matchers//protobuf-matchers",
         "@com_google_absl//absl/strings:string_view",
         "@com_google_googletest//:gtest_main",
+    ],
+)
+
+objc_library(
+    name = "apple_unsupported_mediums_test_lib",
+    testonly = True,
+    srcs = ["apple_unsupported_mediums_test.mm"],
+    deps = [
+        ":mediums",
+        "//internal/platform:mac_address",
+        "//internal/platform/implementation/apple",  # buildcleaner: keep
+        "//proto:connections_enums_cc_proto",
+        "//third_party/apple_frameworks:XCTest",
+    ],
+)
+
+ios_unit_test(
+    name = "apple_unsupported_mediums_test",
+    minimum_os_version = IOS_MINIMUM_OS,
+    runner = IOS_LATEST_TEST_RUNNER,
+    deps = [
+        ":apple_unsupported_mediums_test_lib",
     ],
 )
