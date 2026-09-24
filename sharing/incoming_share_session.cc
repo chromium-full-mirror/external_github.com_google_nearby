@@ -92,6 +92,13 @@ IncomingShareSession::ProcessIntroduction(
     const IntroductionFrame& introduction_frame,
     FilePath destination_directory, const SyncManager& sync_manager,
     const nearby::api::DeviceInfo& device_info) {
+  if (session_phase_ != SessionPhase::kUninitialized) {
+    LOG(WARNING) << __func__
+                 << ": Rejecting duplicate introduction frame, session is "
+                    "already in phase "
+                 << static_cast<int>(session_phase_);
+    return TransferMetadata::Status::kFailed;
+  }
   session_phase_ = SessionPhase::kTransfer;
   // If transfer is for file sync, override the save path to the custom save
   // path.
