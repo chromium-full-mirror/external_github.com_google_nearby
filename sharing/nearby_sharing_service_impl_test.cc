@@ -2822,6 +2822,28 @@ TEST_F(NearbySharingServiceImplTest, AcceptValidShareTargetPayloadSuccessful) {
 }
 
 TEST_F(NearbySharingServiceImplTest,
+       AcceptValidShareTargetPayloadSuccessfulDeletesUnknownFilePaths) {
+  FilePath unknown_file_path =
+      Files::GetTemporaryDirectory().append(FilePath("unknown_file_payload"));
+  std::ofstream file_stream(unknown_file_path.GetPath());
+  file_stream << "unsolicited payload";
+  file_stream.close();
+  ASSERT_TRUE(Files::FileExists(unknown_file_path));
+  fake_nearby_connections_manager_->AddUnknownFilePathsToDeleteForTesting(
+      unknown_file_path);
+
+  SuccessfullyReceiveTransfer();
+  FlushTesting();
+  // NearbyFileHandler::DeleteFilesFromDisk sleeps 1s before deleting files.
+  absl::SleepFor(absl::Milliseconds(1200));
+
+  EXPECT_TRUE(
+      fake_nearby_connections_manager_->GetUnknownFilePathsToDeleteForTesting()
+          .empty());
+  EXPECT_FALSE(Files::FileExists(unknown_file_path));
+}
+
+TEST_F(NearbySharingServiceImplTest,
        AcceptValidShareTargetPayloadSuccessfulIncomingPayloadNotFound) {
   NiceMock<MockTransferUpdateCallback> callback;
   int64_t share_target_id = SetUpIncomingConnection(callback);
@@ -5027,6 +5049,7 @@ TEST_F(NearbySharingServiceImplTest, RemoveIncomingPayloads) {
       share_target,
       [](const IncomingShareSession&, const TransferMetadata&) {});
   service_->RemoveIncomingPayloads(session);
+  service_->DeleteUnknownFilePaths();
   EXPECT_EQ(
       fake_nearby_connections_manager_->GetUnknownFilePathsToDeleteForTesting()
           .size(),

@@ -417,6 +417,7 @@ void NearbySharingServiceImpl::Cleanup() {
   absl::flat_hash_map<int64_t, IncomingShareSession> tmp_incoming_session_map;
   tmp_incoming_session_map.swap(incoming_share_session_map_);
   tmp_incoming_session_map.clear();
+  DeleteUnknownFilePaths();
 
   discovered_advertisements_to_retry_map_.clear();
   discovered_advertisements_retried_set_.clear();
@@ -2439,15 +2440,11 @@ void NearbySharingServiceImpl::OnIncomingTransferUpdate(
         /* referrer_package=*/std::nullopt);
 
     OnTransferComplete();
+    DeleteUnknownFilePaths();
     if (metadata.status() != TransferMetadata::Status::kComplete) {
       // For any type of failure, lets make sure any pending files get cleaned
       // up.
       RemoveIncomingPayloads(session);
-    } else {
-      if (!nearby_connections_manager_->GetAndClearUnknownFilePathsToDelete()
-               .empty()) {
-        LOG(WARNING) << __func__ << ": Unknown file paths are not empty.";
-      }
     }
     // If backup session, update last backup time in preference.
     if (session.session_usage() == ShareSessionUsage::kFileSync) {
@@ -2488,6 +2485,7 @@ void NearbySharingServiceImpl::OnOutgoingTransferUpdate(
     session.SendAttachmentsCompleted(metadata);
     is_connecting_ = false;
     OnTransferComplete();
+    DeleteUnknownFilePaths();
   } else if (metadata.status() ==
              TransferMetadata::Status::kAwaitingLocalConfirmation) {
     is_connecting_ = false;
@@ -3150,17 +3148,22 @@ void NearbySharingServiceImpl::RemoveIncomingPayloads(
     const IncomingShareSession& session) {
   LOG(INFO) << __func__ << ": Cleaning up payloads due to transfer failure";
   nearby_connections_manager_->ClearIncomingPayloads();
-  std::vector<FilePath> files_for_deletion;
+  std::vector<FilePath> files_for_deletion = session.GetPayloadFilePaths();
+  if (!files_for_deletion.empty()) {
+    file_handler_.DeleteFilesFromDisk(std::move(files_for_deletion), []() {});
+  }
+}
+
+void NearbySharingServiceImpl::DeleteUnknownFilePaths() {
   auto file_paths_to_delete =
       nearby_connections_manager_->GetAndClearUnknownFilePathsToDelete();
-  for (auto it = file_paths_to_delete.begin(); it != file_paths_to_delete.end();
-       ++it) {
-    VLOG(1) << __func__ << ": Has unknown file path to delete.";
-    files_for_deletion.push_back(*it);
+  if (file_paths_to_delete.empty()) {
+    return;
   }
-  std::vector<FilePath> payload_file_path = session.GetPayloadFilePaths();
-  files_for_deletion.insert(files_for_deletion.end(), payload_file_path.begin(),
-                            payload_file_path.end());
+  LOG(WARNING) << __func__ << ": Unknown file paths are not empty, deleting "
+               << file_paths_to_delete.size() << " file(s).";
+  std::vector<FilePath> files_for_deletion(file_paths_to_delete.begin(),
+                                           file_paths_to_delete.end());
   file_handler_.DeleteFilesFromDisk(std::move(files_for_deletion), []() {});
 }
 
@@ -3205,6 +3208,7 @@ IncomingShareSession* NearbySharingServiceImpl::GetIncomingShareSession(
 
 void NearbySharingServiceImpl::UnregisterShareTarget(int64_t share_target_id) {
   LOG(INFO) << __func__ << ": Unregister share target " << share_target_id;
+  DeleteUnknownFilePaths();
 
   // If share target ID is found in incoming_share_session_map_, then it's an
   // incoming share target.
