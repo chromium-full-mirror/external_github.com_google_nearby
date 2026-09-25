@@ -20,6 +20,7 @@
 #include <string>
 #include <utility>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
@@ -36,6 +37,8 @@
 #include "internal/platform/implementation/platform.h"
 #include "internal/platform/input_stream.h"
 #include "internal/platform/logging.h"
+#include "internal/platform/mutex.h"
+#include "internal/platform/mutex_lock.h"
 #include "internal/platform/output_stream.h"
 #include "internal/platform/pipe.h"
 
@@ -296,9 +299,13 @@ class IncomingFileInternalPayload : public InternalPayload {
   ByteArray DetachNextChunk(int chunk_size) override { return {}; }
 
   Exception AttachNextChunk(absl::string_view chunk) override {
+    MutexLock lock(&mutex_);
+    if (is_closed_) {
+      return {Exception::kIo};
+    }
     if (chunk.empty()) {
       // Received null last chunk for incoming payload.
-      Close();
+      CloseLocked();
       return {Exception::kSuccess};
     }
     // Truncate 1 incoming chunk to the total size of the payload.
@@ -307,7 +314,7 @@ class IncomingFileInternalPayload : public InternalPayload {
     // For file payloads, total size must be valid.
     if (bytes_written_ + chunk.size() > total_size_) {
       if (total_size_ <= bytes_written_) {
-        Close();
+        CloseLocked();
         return {Exception::kIo};
       }
       // TODO(b/511806938): Add metrics to track if this ever happens.  If not,
@@ -327,16 +334,25 @@ class IncomingFileInternalPayload : public InternalPayload {
   }
 
   void Close() override {
+    MutexLock lock(&mutex_);
+    CloseLocked();
+  }
+
+ private:
+  void CloseLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
+    if (is_closed_) return;
+    is_closed_ = true;
     output_file_.SetLastModifiedTime(last_modified_time_);
     output_file_.Close();
   }
 
- private:
-  OutputFile output_file_;
+  mutable Mutex mutex_;
+  bool is_closed_ ABSL_GUARDED_BY(mutex_) = false;
+  OutputFile output_file_ ABSL_GUARDED_BY(mutex_);
   absl::Time last_modified_time_;
   const int64_t total_size_;
   // Bytes written to the output file.
-  int64_t bytes_written_ = 0;
+  int64_t bytes_written_ ABSL_GUARDED_BY(mutex_) = 0;
 };
 
 }  // namespace
