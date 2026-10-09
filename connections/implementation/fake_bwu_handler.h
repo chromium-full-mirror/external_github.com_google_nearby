@@ -60,6 +60,10 @@ class FakeBwuHandler : public BaseBwuHandler {
       : BaseBwuHandler(nullptr), medium_(medium) {}
   ~FakeBwuHandler() override = default;
 
+  void set_return_null_channel(bool return_null_channel) {
+    return_null_channel_ = return_null_channel;
+  }
+
   const std::vector<InputData>& create_calls() const { return create_calls_; }
   const std::vector<InputData>& disconnect_calls() const {
     return disconnect_calls_;
@@ -111,6 +115,10 @@ class FakeBwuHandler : public BaseBwuHandler {
     create_calls_.push_back({.client = client,
                              .service_id = service_id,
                              .endpoint_id = endpoint_id});
+    if (return_null_channel_) {
+      return {Error(location::nearby::proto::connections::OperationResultCode::
+                        NEARBY_GENERIC_NEW_ENDPOINT_CHANNEL_NULL)};
+    }
     return {std::make_unique<FakeEndpointChannel>(medium_, service_id)};
   }
 
@@ -193,6 +201,7 @@ class FakeBwuHandler : public BaseBwuHandler {
   }
 
   Medium medium_;
+  bool return_null_channel_ = false;
   std::vector<InputData> create_calls_;
   std::vector<InputData> disconnect_calls_;
   std::vector<InputData> handle_initialize_calls_;
