@@ -146,6 +146,9 @@ class PayloadManager : public EndpointManager::FrameProcessor {
     void MarkReceivedAckFromEndpoint(const std::string& from_endpoint_id);
     bool IsIncoming() const;
 
+    // Returns the time this pending payload started being tracked.
+    absl::Time GetStartTime() const { return start_time_; }
+
     // Gets the EndpointInfo objects for the endpoints (still) associated with
     // this payload.
     std::vector<const EndpointInfo*> GetEndpoints() const
@@ -192,6 +195,7 @@ class PayloadManager : public EndpointManager::FrameProcessor {
     absl::AnyInvocable<void(PendingPayload*) &&> destroy_callback_;
     absl::flat_hash_map<std::string, EndpointInfo> endpoints_
         ABSL_GUARDED_BY(mutex_);
+    absl::Time start_time_;
     int refcount_ = 0;
   };
 

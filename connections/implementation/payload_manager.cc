@@ -28,6 +28,7 @@
 #include "absl/functional/bind_front.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "connections/implementation/analytics/analytics_recorder.h"
@@ -52,6 +53,7 @@
 #include "internal/platform/logging.h"
 #include "internal/platform/mutex_lock.h"
 #include "internal/platform/single_thread_executor.h"
+#include "proto/connections_enums.pb.h"
 
 namespace nearby::connections {
 
@@ -108,6 +110,45 @@ PayloadProgressInfo::Status PayloadStatusToTransferUpdateStatus(
     default:
       return PayloadProgressInfo::Status::kFailure;
   }
+}
+
+const char* PayloadHeaderTypeToString(
+    const PayloadTransferFrame::PayloadHeader& payload_header) {
+  switch (payload_header.type()) {
+    case PayloadTransferFrame::PayloadHeader::BYTES:
+      return "BYTES";
+    case PayloadTransferFrame::PayloadHeader::FILE:
+      return "FILE";
+    case PayloadTransferFrame::PayloadHeader::STREAM:
+      return "STREAM";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+// Logs a one-line summary when a payload finishes successfully, similar to the
+// "Received FILE ..." / "Sent FILE ..." logs on Android.
+void LogPayloadTransferSummary(
+    bool is_incoming, absl::string_view endpoint_id,
+    const PayloadTransferFrame::PayloadHeader& payload_header,
+    int64_t total_bytes, absl::Time start_time, Medium medium) {
+  absl::Duration duration = SystemClock::ElapsedRealtime() - start_time;
+  int64_t duration_ms = absl::ToInt64Milliseconds(duration);
+  int64_t throughput_kbps =
+      duration_ms > 0 ? (total_bytes * 1000 / 1024) / duration_ms : 0;
+  // Show MB/s (with one decimal) for faster transfers, KB/s otherwise.
+  std::string throughput =
+      throughput_kbps > 1000
+          ? absl::StrCat(throughput_kbps / 1024, ".",
+                         (throughput_kbps % 1024) * 10 / 1024, " MB/s")
+          : absl::StrCat(throughput_kbps, " KB/s");
+  LOG(INFO) << (is_incoming ? "Received " : "Sent ")
+            << PayloadHeaderTypeToString(payload_header)
+            << " payload: payload_id=" << payload_header.id()
+            << ", endpoint_id=" << endpoint_id << ", medium="
+            << location::nearby::proto::connections::Medium_Name(medium)
+            << ", size=" << total_bytes << " bytes, duration=" << duration_ms
+            << " ms, throughput=" << throughput;
 }
 
 }  // namespace
@@ -1139,6 +1180,10 @@ void PayloadManager::HandleSuccessfulOutgoingChunk(
         client->OnPayloadProgress(endpoint_id, update);
 
         if (is_last_chunk) {
+          LogPayloadTransferSummary(/*is_incoming=*/false, endpoint_id,
+                                    payload_header, payload_chunk_offset,
+                                    pending_payload->GetStartTime(),
+                                    client->GetConnectedMedium(endpoint_id));
           client->GetAnalyticsRecorder().OnOutgoingPayloadDone(
               endpoint_id, payload_header.id(), PayloadStatus::SUCCESS,
               OperationResultCode::DETAIL_SUCCESS);
@@ -1248,6 +1293,10 @@ void PayloadManager::HandleSuccessfulIncomingChunk(
 
         // Analyze the success.
         if (is_last_chunk) {
+          LogPayloadTransferSummary(/*is_incoming=*/true, endpoint_id,
+                                    payload_header, payload_chunk_offset,
+                                    pending_payload->GetStartTime(),
+                                    client->GetConnectedMedium(endpoint_id));
           DestroyPendingPayload(payload_header.id());
           client->GetAnalyticsRecorder().OnIncomingPayloadDone(
               endpoint_id, payload_header.id(), PayloadStatus::SUCCESS,
@@ -1287,10 +1336,10 @@ void PayloadManager::ProcessDataPacket(
       LOG(WARNING) << "ProcessDataPacket: [duplicate] endpoint_id="
                    << from_endpoint_id << "; payload_id=" << payload_id
                    << ", aborting receipt.";
-      HandleIncomingPayloadError(
-          to_client, from_endpoint_id, payload_header, payload_chunk.offset(),
-          PayloadStatus::LOCAL_ERROR,
-          OperationResultCode::IO_FILE_OPENING_ERROR);
+      HandleIncomingPayloadError(to_client, from_endpoint_id, payload_header,
+                                 payload_chunk.offset(),
+                                 PayloadStatus::LOCAL_ERROR,
+                                 OperationResultCode::IO_FILE_OPENING_ERROR);
       return;
     }
     RunOnStatusUpdateThread(
@@ -1586,7 +1635,8 @@ PayloadManager::PendingPayload::PendingPayload(
     const std::vector<std::string>& endpoint_ids,
     absl::AnyInvocable<void(PendingPayload*) &&> destroy_callback)
     : incoming_payload_(std::move(incoming_payload)),
-      destroy_callback_(std::move(destroy_callback)) {
+      destroy_callback_(std::move(destroy_callback)),
+      start_time_(SystemClock::ElapsedRealtime()) {
   InitEndpoints(endpoint_ids);
 }
 
@@ -1595,7 +1645,8 @@ PayloadManager::PendingPayload::PendingPayload(
     const std::vector<std::string>& endpoint_ids,
     absl::AnyInvocable<void(PendingPayload*) &&> destroy_callback)
     : outgoing_payload_(std::move(outgoing_payload)),
-      destroy_callback_(std::move(destroy_callback)) {
+      destroy_callback_(std::move(destroy_callback)),
+      start_time_(SystemClock::ElapsedRealtime()) {
   InitEndpoints(endpoint_ids);
 }
 
