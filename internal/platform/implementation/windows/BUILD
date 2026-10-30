@@ -251,7 +251,7 @@ cc_library(
 )
 
 cc_library(
-    name = "windows",
+    name = "windows_impl",
     srcs = [
         "ble.cc",
         "ble_gatt_client.cc",
@@ -271,7 +271,6 @@ cc_library(
         "nearby_client_socket.cc",
         "nearby_server_socket.cc",
         "output_file.cc",
-        "platform.cc",
         "preferences_manager.cc",
         "preferences_repository.cc",
         "system_clock.cc",
@@ -319,25 +318,14 @@ cc_library(
         "wifi_lan.h",
         "wifi_lan_mdns.h",
     ],
-    copts = [
-        "-DNO_INTEL_PIE",
-        "-D_WIN32_WINNT=_WIN32_WINNT_WIN10 -DWINVER=_WIN32_WINNT_WIN10",
-    ],
+    copts = ["-D_WIN32_WINNT=_WIN32_WINNT_WIN10 -DWINVER=_WIN32_WINNT_WIN10"],
     linkopts = [
         "iphlpapi.lib",
     ],
     tags = ["windows"],
-    visibility = [
-        "//chrome/chromeos/assistant/data_migration/lib:__pkg__",
-        "//connections:__subpackages__",
-        "//connections:partners",
-        "//internal/platform:__subpackages__",
-        "//location/nearby:__subpackages__",
-        "//sharing:__subpackages__",
-    ],
+    visibility = ["//visibility:private"],
     deps = [
         ":crypto",  # build_cleaner: keep
-        ":device_paths",
         ":network_info",
         ":registry",
         ":scoped_wlan_memory",
@@ -363,7 +351,6 @@ cc_library(
         "//internal/platform/implementation:platform",
         "//internal/platform/implementation:types",
         "//internal/platform/implementation:wifi_utils",
-        "//internal/platform/implementation/shared:count_down_latch",
         "//third_party/WinRT:winrt",
         "//third_party/intel/pie",
         "@com_google_absl//absl/base:core_headers",
@@ -382,6 +369,42 @@ cc_library(
         "@com_google_protobuf//json",
         "@nlohmann_json//:json",
     ],
+)
+
+cc_library(
+    name = "windows",
+    srcs = [
+        "platform.cc",
+    ],
+    copts = ["-DNO_INTEL_PIE"],
+    tags = ["windows"],
+    visibility = [
+        "//chrome/chromeos/assistant/data_migration/lib:__pkg__",
+        "//connections:__subpackages__",
+        "//connections:partners",
+        "//internal/platform:__subpackages__",
+        "//location/nearby:__subpackages__",
+        "//sharing:__subpackages__",
+    ],
+    deps = [
+        ":device_paths",
+        ":string_utils",
+        ":types",
+        ":windows_impl",
+        "//internal/base:file_path",
+        "//internal/base:files",
+        "//internal/platform:base",
+        "//internal/platform:logging",
+        "//internal/platform/implementation:comm",
+        "//internal/platform/implementation:platform",
+        "//internal/platform/implementation:types",
+        "//internal/platform/implementation:wifi_utils",
+        "//internal/platform/implementation/shared:count_down_latch",
+        "@com_google_absl//absl/base:core_headers",
+        "@com_google_absl//absl/status:statusor",
+        "@com_google_absl//absl/strings:string_view",
+    ],
+    alwayslink = True,
 )
 
 cc_library(
@@ -467,7 +490,7 @@ cc_test(
         ":string_utils",
         ":test_data",
         ":types",
-        ":windows",
+        ":windows_impl",
         "//internal/base:file_path",
         "//internal/base:files",
         "//internal/flags:nearby_flags",
@@ -516,7 +539,7 @@ cc_test(
     ],
     tags = ["windows"],
     deps = [
-        ":windows",
+        ":windows_impl",
         "//internal/platform:base",
         "//internal/platform:logging",
         "@com_github_protobuf_matchers//protobuf-matchers",
@@ -535,7 +558,7 @@ cc_test(
     ],
     tags = ["windows"],
     deps = [
-        ":windows",
+        ":windows_impl",
         "//internal/platform:base",
         "//internal/platform:logging",
         "@com_github_protobuf_matchers//protobuf-matchers",
@@ -628,7 +651,7 @@ cc_test(
     ],
     deps = [
         ":socket_address",
-        ":windows",
+        ":windows_impl",
         "//internal/platform:base",
         "@com_github_protobuf_matchers//protobuf-matchers",
         "@com_google_absl//absl/time",
@@ -645,7 +668,7 @@ cc_test(
     ],
     deps = [
         ":socket_address",
-        ":windows",
+        ":windows_impl",
         "@com_github_protobuf_matchers//protobuf-matchers",
         "@com_google_googletest//:gtest_main",
     ],
