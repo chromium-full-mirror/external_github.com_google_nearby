@@ -200,6 +200,7 @@ void BwuManager::Shutdown() {
   CancelAllRetryUpgradeAlarms();
   medium_ = Medium::UNKNOWN_MEDIUM;
   endpoint_id_to_bwu_medium_.clear();
+  role_switched_endpoints_.clear();
   for (auto& medium_handler_pair : handlers_) {
     if (medium_handler_pair.second != nullptr) {
       medium_handler_pair.second->RevertInitiatorState();
@@ -344,6 +345,7 @@ void BwuManager::InitiateBwuForEndpoint(ClientProxy* client,
             OperationResultCode::CONNECTIVITY_GENERIC_WRITING_CHANNEL_IO_ERROR);
         return;
       }
+      role_switched_endpoints_.emplace(endpoint_id);
       LOG(INFO) << "BwuManager successfully wrote the "
                    "BANDWIDTH_UPGRADE_NEGOTIATION.UPGRADE_PATH_REQUEST "
                    "OfflineFrame while upgrading endpoint "
@@ -353,6 +355,7 @@ void BwuManager::InitiateBwuForEndpoint(ClientProxy* client,
       return;
     }
 
+    role_switched_endpoints_.erase(endpoint_id);
     SetBwuMediumForEndpoint(endpoint_id, proposed_medium);
     std::string service_id = channel->GetServiceId();
     std::string bytes = handler->InitializeUpgradedMediumForEndpoint(
@@ -466,6 +469,7 @@ void BwuManager::OnEndpointDisconnect(ClientProxy* client,
       }
     }
     in_progress_upgrades_.erase(endpoint_id);
+    role_switched_endpoints_.erase(endpoint_id);
     retry_delays_.erase(endpoint_id);
     CancelRetryUpgradeAlarm(endpoint_id);
     successfully_upgraded_endpoints_.erase(endpoint_id);
@@ -846,6 +850,7 @@ void BwuManager::ProcessBwuPathAvailableEvent(
   }
 
   bool abort_bwu = client->IsIncomingConnection(endpoint_id) &&
+                   !role_switched_endpoints_.contains(endpoint_id) &&
                    !CanSwitchRoleForMedium(client, endpoint_id, upgrade_medium);
   if (abort_bwu) {
     LOG(INFO)
@@ -1417,6 +1422,7 @@ void BwuManager::ProcessSafeToClosePriorChannelEvent(
   }
   client->OnBandwidthChanged(endpoint_id, medium);
   in_progress_upgrades_.erase(endpoint_id);
+  role_switched_endpoints_.erase(endpoint_id);
 }
 
 void BwuManager::ProcessUpgradeFailureEvent(
