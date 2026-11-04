@@ -46,6 +46,7 @@
 #include "connections/power_level.h"
 #include "internal/flags/nearby_flags.h"
 #include "internal/platform/ble.h"
+#include "internal/platform/borrowable.h"
 #include "internal/platform/byte_array.h"
 #include "internal/platform/cancelable_alarm.h"
 #include "internal/platform/cancellation_flag.h"
@@ -105,10 +106,27 @@ Ble::~Ble() {
     StopAcceptingL2capConnections(l2cap_server_sockets_.begin()->first);
   }
 
+  lender_.Release();
+
+  absl::flat_hash_map<
+      std::string,
+      absl::flat_hash_map<api::ble::BleL2capSocket*, BleL2capSocket>>
+      incoming_l2cap_sockets;
+  {
+    absl::MutexLock lock(mutex_);
+    incoming_l2cap_sockets = std::move(l2cap_incoming_service_id_to_sockets_);
+    l2cap_incoming_service_id_to_sockets_.clear();
+  }
+  for (auto& [service_id, sockets] : incoming_l2cap_sockets) {
+    for (auto& [socket_ptr, socket] : sockets) {
+      socket.SetCloseNotifier(nullptr);
+      socket.Close();
+    }
+  }
+
   serial_executor_.Shutdown();
   alarm_executor_.Shutdown();
   accept_loops_runner_.Shutdown();
-
   instant_on_lost_manager_.Shutdown();
 }
 
@@ -714,7 +732,8 @@ ErrorOr<int> Ble::StartAcceptingL2capConnections(
   // is invoked.
   accept_loops_runner_.Execute(
       "ble-l2cap-accept",
-      [this, service_id, callback = std::move(callback),
+      [this, borrowable = lender_.GetBorrowable(), service_id,
+       callback = std::move(callback),
        server_socket = std::move(owned_server_socket)]() mutable {
         while (true) {
           BleL2capSocket client_socket = server_socket.Accept();
@@ -724,14 +743,39 @@ ErrorOr<int> Ble::StartAcceptingL2capConnections(
             break;
           }
           LOG(INFO) << "The client L2CAP socket has been accepted.";
+          bool is_accepting = false;
           {
             absl::MutexLock lock(mutex_);
-            client_socket.SetCloseNotifier([this, service_id]() {
-              absl::MutexLock lock(mutex_);
-              incoming_sockets_.erase(service_id);
-            });
-            l2cap_incoming_service_id_to_sockets_.insert(
-                {service_id, client_socket});
+            is_accepting = IsAcceptingL2capConnectionsLocked(service_id);
+            if (is_accepting) {
+              api::ble::BleL2capSocket* socket_ptr = &client_socket.GetImpl();
+              client_socket.SetCloseNotifier(
+                  [borrowable, service_id, socket_ptr]() {
+                    Borrowed<Ble*> borrowed = borrowable.Borrow();
+                    if (!borrowed) {
+                      return;
+                    }
+                    Ble* ble = *borrowed;
+                    absl::MutexLock lock(ble->mutex_);
+                    auto it =
+                        ble->l2cap_incoming_service_id_to_sockets_.find(
+                            service_id);
+                    if (it !=
+                        ble->l2cap_incoming_service_id_to_sockets_.end()) {
+                      it->second.erase(socket_ptr);
+                      if (it->second.empty()) {
+                        ble->l2cap_incoming_service_id_to_sockets_.erase(it);
+                      }
+                    }
+                  });
+              l2cap_incoming_service_id_to_sockets_[service_id].insert(
+                  {socket_ptr, client_socket});
+            }
+          }
+          if (!is_accepting) {
+            client_socket.Close();
+            server_socket.Close();
+            break;
           }
           if (callback) {
             callback(std::move(client_socket), service_id);
@@ -880,7 +924,8 @@ ErrorOr<int> Ble::StartAcceptingL2capConnections(
   // is invoked.
   accept_loops_runner_.Execute(
       "ble-l2cap-accept",
-      [this, service_id, callback = std::move(callback),
+      [this, borrowable = lender_.GetBorrowable(), service_id,
+       callback = std::move(callback),
        server_socket = std::move(owned_server_socket)]() mutable {
         while (true) {
           BleL2capSocket client_socket = server_socket.Accept();
@@ -891,29 +936,55 @@ ErrorOr<int> Ble::StartAcceptingL2capConnections(
           } else {
             LOG(INFO) << "The client L2CAP socket has been accepted.";
           }
+          bool is_accepting = false;
           {
             absl::MutexLock lock(mutex_);
-            client_socket.SetCloseNotifier([this, service_id]() {
-              absl::MutexLock lock(mutex_);
-              incoming_sockets_.erase(service_id);
-            });
-            l2cap_incoming_service_id_to_sockets_.insert(
-                {service_id, client_socket});
+            is_accepting = IsAcceptingL2capConnectionsLocked(service_id);
+            if (is_accepting) {
+              api::ble::BleL2capSocket* socket_ptr = &client_socket.GetImpl();
+              client_socket.SetCloseNotifier(
+                  [borrowable, service_id, socket_ptr]() {
+                    Borrowed<Ble*> borrowed = borrowable.Borrow();
+                    if (!borrowed) {
+                      return;
+                    }
+                    Ble* ble = *borrowed;
+                    absl::MutexLock lock(ble->mutex_);
+                    auto it =
+                        ble->l2cap_incoming_service_id_to_sockets_.find(
+                            service_id);
+                    if (it !=
+                        ble->l2cap_incoming_service_id_to_sockets_.end()) {
+                      it->second.erase(socket_ptr);
+                      if (it->second.empty()) {
+                        ble->l2cap_incoming_service_id_to_sockets_.erase(it);
+                      }
+                    }
+                  });
+              l2cap_incoming_service_id_to_sockets_[service_id].insert(
+                  {socket_ptr, client_socket});
+            }
+          }
+          if (!is_accepting) {
+            client_socket.Close();
+            server_socket.Close();
+            break;
+          }
+          auto ble_socket = mediums::BleSocket::CreateWithL2capSocket(
+              std::move(client_socket),
+              mediums::bleutils::GenerateHash(
+                  service_id,
+                  mediums::BleAdvertisement::kServiceIdHashLength));
+          Exception exception =
+              ble_socket->ProcessIncomingL2capPacketValidation();
+          if (!exception.Ok()) {
+            LOG(WARNING)
+                << "Failed to process incoming L2CAP packet validation: "
+                << exception.value;
+            ble_socket->Close();
+            continue;
           }
           if (callback) {
-            auto ble_socket = mediums::BleSocket::CreateWithL2capSocket(
-                std::move(client_socket),
-                mediums::bleutils::GenerateHash(
-                    service_id,
-                    mediums::BleAdvertisement::kServiceIdHashLength));
-            Exception exception =
-                ble_socket->ProcessIncomingL2capPacketValidation();
-            if (!exception.Ok()) {
-              LOG(WARNING)
-                  << "Failed to process incoming L2CAP packet validation: "
-                  << exception.value;
-              return;
-            }
             callback(std::move(ble_socket), service_id);
           }
         }

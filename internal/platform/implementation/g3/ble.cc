@@ -31,6 +31,7 @@
 #include "absl/synchronization/mutex.h"
 #include "internal/platform/borrowable.h"
 #include "internal/platform/byte_array.h"
+#include "internal/platform/cancellation_flag.h"
 #include "internal/platform/cancellation_flag_listener.h"
 #include "internal/platform/count_down_latch.h"
 #include "internal/platform/exception.h"
@@ -65,6 +66,25 @@ std::string TxPowerLevelToName(TxPowerLevel power_mode) {
       return "Unknown";
   }
 }
+
+class DelegatingBleL2capServerSocket : public api::ble::BleL2capServerSocket {
+ public:
+  explicit DelegatingBleL2capServerSocket(
+      std::shared_ptr<BleL2capServerSocket> server_socket)
+      : server_socket_(std::move(server_socket)) {}
+  ~DelegatingBleL2capServerSocket() override { server_socket_->Close(); }
+
+  int GetPSM() const override { return server_socket_->GetPSM(); }
+
+  std::unique_ptr<api::ble::BleL2capSocket> Accept() override {
+    return server_socket_->Accept();
+  }
+
+  Exception Close() override { return server_socket_->Close(); }
+
+ private:
+  std::shared_ptr<BleL2capServerSocket> server_socket_;
+};
 
 }  // namespace
 
@@ -149,6 +169,100 @@ Exception BleServerSocket::DoClose() {
   return {Exception::kSuccess};
 }
 
+api::ble::BlePeripheral::UniqueId BleL2capSocket::GetRemotePeripheralId() {
+  BleL2capSocket* remote_socket = GetRemoteSocket();
+  if (remote_socket == nullptr || remote_socket->adapter_ == nullptr ||
+      remote_socket->adapter_->GetBleMedium() == nullptr) {
+    return 0LL;
+  }
+  return remote_socket->adapter_->GetUniqueId();
+}
+
+std::unique_ptr<api::ble::BleL2capSocket> BleL2capServerSocket::Accept() {
+  absl::MutexLock lock(mutex_);
+  while (!closed_ && pending_sockets_.empty()) {
+    cond_.Wait(&mutex_);
+  }
+  if (closed_) return {};
+  auto* remote_socket =
+      pending_sockets_.extract(pending_sockets_.begin()).value();
+  CHECK(remote_socket);
+
+  auto local_socket = std::make_unique<BleL2capSocket>(adapter_);
+  local_socket->Connect(*remote_socket);
+  remote_socket->Connect(*local_socket);
+  cond_.SignalAll();
+  return local_socket;
+}
+
+bool BleL2capServerSocket::Connect(BleL2capSocket& socket,
+                                   CancellationFlag* cancellation_flag) {
+  absl::MutexLock lock(mutex_);
+  if (closed_ || socket.IsClosed() ||
+      (cancellation_flag != nullptr && cancellation_flag->Cancelled())) {
+    return false;
+  }
+  if (socket.IsConnected()) {
+    LOG(WARNING)
+        << "Failed to connect to Ble L2CAP server socket: already connected";
+    return true;
+  }
+  pending_sockets_.insert(&socket);
+  cond_.SignalAll();
+  while (!closed_ && !socket.IsConnected() && !socket.IsClosed()) {
+    cond_.Wait(&mutex_);
+  }
+  if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+    pending_sockets_.erase(&socket);
+    socket.Close();
+    return false;
+  }
+  if (!socket.IsConnected()) {
+    pending_sockets_.erase(&socket);
+    return false;
+  }
+  return true;
+}
+
+void BleL2capServerSocket::CancelConnect(BleL2capSocket* socket) {
+  absl::MutexLock lock(mutex_);
+  if (pending_sockets_.erase(socket) > 0) {
+    socket->Close();
+    cond_.SignalAll();
+  }
+}
+
+void BleL2capServerSocket::SetCloseNotifier(
+    absl::AnyInvocable<void()> notifier) {
+  absl::MutexLock lock(mutex_);
+  close_notifier_ = std::move(notifier);
+}
+
+BleL2capServerSocket::~BleL2capServerSocket() {
+  absl::MutexLock lock(mutex_);
+  DoClose();
+}
+
+Exception BleL2capServerSocket::Close() {
+  absl::MutexLock lock(mutex_);
+  return DoClose();
+}
+
+Exception BleL2capServerSocket::DoClose() {
+  bool should_notify = !closed_;
+  closed_ = true;
+  if (should_notify) {
+    cond_.SignalAll();
+    if (close_notifier_) {
+      auto notifier = std::move(close_notifier_);
+      mutex_.unlock();
+      notifier();
+      mutex_.lock();
+    }
+  }
+  return {Exception::kSuccess};
+}
+
 BleMedium::BleMedium(BluetoothAdapter& adapter) : adapter_(adapter) {
   CHECK(&adapter_);
   adapter_.SetBleMedium(this);
@@ -160,6 +274,13 @@ BleMedium::BleMedium(BluetoothAdapter& adapter) : adapter_(adapter) {
 }
 
 BleMedium::~BleMedium() {
+  {
+    absl::MutexLock lock(mutex_);
+    for (auto& [service_id, server_socket] : l2cap_server_sockets_) {
+      server_socket->SetCloseNotifier(nullptr);
+    }
+    l2cap_server_sockets_.clear();
+  }
   adapter_.SetBleMedium(nullptr);
   MediumEnvironment::Instance().UnregisterBleMedium(*this);
 }
@@ -717,8 +838,27 @@ std::unique_ptr<api::ble::BleServerSocket> BleMedium::OpenServerSocket(
 
 std::unique_ptr<api::ble::BleL2capServerSocket>
 BleMedium::OpenL2capServerSocket(const std::string& service_id) {
-  // TODO(mingshiouwu): add more codes for g3 testing.
-  return nullptr;
+  if (!MediumEnvironment::Instance().IsBleL2capAvailable()) {
+    return nullptr;
+  }
+  constexpr int kDefaultL2capPsm = 0x0080;
+  auto server_socket =
+      std::make_shared<BleL2capServerSocket>(&GetAdapter(), kDefaultL2capPsm);
+  BleL2capServerSocket* server_socket_ptr = server_socket.get();
+  server_socket->SetCloseNotifier([this, service_id, server_socket_ptr]() {
+    absl::MutexLock lock(mutex_);
+    auto it = l2cap_server_sockets_.find(service_id);
+    if (it != l2cap_server_sockets_.end() &&
+        it->second.get() == server_socket_ptr) {
+      l2cap_server_sockets_.erase(it);
+    }
+  });
+  LOG(INFO) << "G3 Ble Adding L2CAP server socket: medium=" << this
+            << ", service_id=" << service_id;
+  absl::MutexLock lock(mutex_);
+  l2cap_server_sockets_[service_id] = server_socket;
+  return std::make_unique<DelegatingBleL2capServerSocket>(
+      std::move(server_socket));
 }
 
 std::unique_ptr<api::ble::BleSocket> BleMedium::Connect(
@@ -778,6 +918,64 @@ std::unique_ptr<api::ble::BleSocket> BleMedium::Connect(
     return nullptr;
   }
   LOG(INFO) << "G3 Ble Connect to socket=" << socket.get();
+  return socket;
+}
+
+std::unique_ptr<api::ble::BleL2capSocket> BleMedium::ConnectOverL2cap(
+    int psm, const std::string& service_id, TxPowerLevel tx_power_level,
+    api::ble::BlePeripheral::UniqueId remote_peripheral_id,
+    CancellationFlag* cancellation_flag) {
+  if (!MediumEnvironment::Instance().IsBleL2capAvailable()) {
+    return nullptr;
+  }
+  BleMedium* remote_medium = static_cast<BleMedium*>(
+      MediumEnvironment::Instance().FindBleMedium(remote_peripheral_id));
+  if (remote_medium == nullptr) {
+    LOG(INFO) << "Peripheral not found, id= " << remote_peripheral_id;
+    return nullptr;
+  }
+
+  std::shared_ptr<BleL2capServerSocket> remote_server_socket;
+  {
+    absl::MutexLock medium_lock(remote_medium->mutex_);
+    auto item = remote_medium->l2cap_server_sockets_.find(service_id);
+    remote_server_socket = item != remote_medium->l2cap_server_sockets_.end()
+                               ? item->second
+                               : nullptr;
+    if (remote_server_socket == nullptr ||
+        (psm > 0 && remote_server_socket->GetPSM() != psm)) {
+      LOG(ERROR) << "G3 Ble Failed to find Ble L2CAP Server socket: service_id="
+                 << service_id << ", psm=" << psm;
+      return nullptr;
+    }
+  }
+
+  if (cancellation_flag != nullptr && cancellation_flag->Cancelled()) {
+    LOG(ERROR) << "G3 BLE ConnectOverL2cap: Has been cancelled: service_id="
+               << service_id;
+    return nullptr;
+  }
+
+  auto socket = std::make_unique<BleL2capSocket>(&GetAdapter());
+  std::unique_ptr<CancellationFlagListener> listener;
+  if (cancellation_flag != nullptr) {
+    listener = std::make_unique<CancellationFlagListener>(
+        cancellation_flag,
+        [remote_server_socket, socket_ptr = socket.get()]() {
+          std::shared_ptr<BleL2capServerSocket> server_socket =
+              remote_server_socket;
+          BleL2capSocket* target_socket = socket_ptr;
+          LOG(INFO) << "G3 Ble Cancel ConnectOverL2cap.";
+          server_socket->CancelConnect(target_socket);
+        });
+  }
+
+  if (!remote_server_socket->Connect(*socket, cancellation_flag)) {
+    LOG(ERROR) << "G3 Ble Failed to connect to existing Ble L2CAP Server "
+                  "socket: service_id="
+               << service_id;
+    return nullptr;
+  }
   return socket;
 }
 
