@@ -136,6 +136,7 @@ class ShareSession {
 
   // Returns false if session is already cancelled, otherwise returns true.
   bool CancelPayloads();
+  bool is_cancelled() const { return is_cancelled_; }
 
   const absl::flat_hash_map<int64_t, int64_t>& attachment_payload_map() const {
     return attachment_payload_map_;
@@ -182,6 +183,9 @@ class ShareSession {
   void WriteFrame(const nearby::sharing::service::proto::Frame& frame);
 
   NearbyConnectionsManager& connections_manager() {
+    return connections_manager_;
+  }
+  const NearbyConnectionsManager& connections_manager() const {
     return connections_manager_;
   }
   void set_endpoint_id(absl::string_view endpoint_id) {
