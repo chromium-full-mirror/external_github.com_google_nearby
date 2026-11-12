@@ -20,9 +20,13 @@
 #include "gmock/gmock.h"
 #include "protobuf-matchers/protocol-buffer-matchers.h"
 #include "gtest/gtest.h"
+#include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "internal/platform/cancellation_flag_listener.h"
 #include "internal/platform/feature_flags.h"
 #include "internal/platform/medium_environment.h"
+#include "internal/platform/single_thread_executor.h"
 
 namespace nearby {
 
@@ -146,6 +150,112 @@ TEST_P(CancellationFlagTest, CannotCancelAfterUnregister) {
   // Release immediately.
   cancellation_flag_listener.reset();
   flag.Cancel();
+}
+
+TEST_P(CancellationFlagTest, ListenerCanQueryCancelledDuringCancel) {
+  CancellationFlag flag;
+  bool cancelled_inside_listener = false;
+  CancellationFlagListener cancellation_flag_listener(
+      &flag, [&flag, &cancelled_inside_listener]() {
+        cancelled_inside_listener = flag.Cancelled();
+        flag.Cancel();
+      });
+
+  flag.Cancel();
+
+  EXPECT_EQ(feature_flags_.enable_cancellation_flag, cancelled_inside_listener);
+}
+
+TEST_P(CancellationFlagTest,
+       UnregisteredSiblingListenerIsNotInvokedDuringCancel) {
+  CancellationFlag flag;
+  int call_count = 0;
+  std::unique_ptr<CancellationFlagListener> listener_1;
+  std::unique_ptr<CancellationFlagListener> listener_2;
+  listener_1 = std::make_unique<CancellationFlagListener>(
+      &flag, [&listener_2, &call_count]() {
+        ++call_count;
+        listener_2.reset();
+      });
+  listener_2 = std::make_unique<CancellationFlagListener>(
+      &flag, [&listener_1, &call_count]() {
+        ++call_count;
+        listener_1.reset();
+      });
+
+  flag.Cancel();
+
+  EXPECT_EQ(feature_flags_.enable_cancellation_flag ? 1 : 0, call_count);
+}
+
+TEST_P(CancellationFlagTest,
+       UnregisterFromAnotherThreadWaitsForActiveListenerToFinish) {
+  CancellationFlag flag;
+  CancellationFlagPeer flag_peer(&flag);
+  if (!feature_flags_.enable_cancellation_flag) {
+    bool listener_invoked = false;
+    auto listener = std::make_unique<CancellationFlagListener>(
+        &flag, [&listener_invoked]() { listener_invoked = true; });
+    flag.Cancel();
+    listener.reset();
+    EXPECT_FALSE(listener_invoked);
+    EXPECT_EQ(0, flag_peer.CancelListenersSize());
+    return;
+  }
+
+  absl::Mutex state_mutex;
+  bool listener_started = false;
+  bool allow_listener_to_finish = false;
+  bool listener_finished = false;
+  bool unregister_finished = false;
+  bool listener_finished_before_unregister_returned = false;
+
+  auto listener = std::make_unique<CancellationFlagListener>(
+      &flag, [&]() {
+        absl::MutexLock lock(state_mutex);
+        listener_started = true;
+        state_mutex.Await(absl::Condition(&allow_listener_to_finish));
+        listener_finished = true;
+      });
+  EXPECT_EQ(1, flag_peer.CancelListenersSize());
+
+  SingleThreadExecutor cancel_executor;
+  SingleThreadExecutor unregister_executor;
+  cancel_executor.Execute([&flag]() { flag.Cancel(); });
+
+  {
+    absl::MutexLock lock(state_mutex);
+    state_mutex.Await(absl::Condition(&listener_started));
+  }
+  unregister_executor.Execute([&]() {
+    listener.reset();
+    absl::MutexLock lock(state_mutex);
+    listener_finished_before_unregister_returned = listener_finished;
+    unregister_finished = true;
+  });
+
+  // Wait until `UnregisterOnCancelListener()` has acquired `*flag.mutex_`,
+  // erased `listener` from `listeners_`, and released `*flag.mutex_` while
+  // waiting in `mutex_->Await()` for `active_listener_ != listener`.
+  while (flag_peer.CancelListenersSize() != 0) {
+    absl::SleepFor(absl::Milliseconds(1));
+  }
+
+  {
+    absl::MutexLock lock(state_mutex);
+    allow_listener_to_finish = true;
+    state_mutex.Await(absl::Condition(&unregister_finished));
+    EXPECT_TRUE(listener_finished_before_unregister_returned);
+  }
+}
+
+TEST_P(CancellationFlagTest, UnregisterNullListenerIsNoOp) {
+  CancellationFlag flag;
+  CancellationFlagPeer flag_peer(&flag);
+
+  flag_peer.UnregisterOnCancelListener(nullptr);
+
+  EXPECT_EQ(0, flag_peer.CancelListenersSize());
 }
 
 INSTANTIATE_TEST_SUITE_P(ParametrisedCancellationFlagTest, CancellationFlagTest,

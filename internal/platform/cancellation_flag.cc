@@ -13,8 +13,10 @@
 // limitations under the License.
 
 #include "internal/platform/cancellation_flag.h"
+
 #include <memory>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/synchronization/mutex.h"
 #include "internal/platform/feature_flags.h"
@@ -41,7 +43,7 @@ void CancellationFlag::Cancel() {
     return;
   }
 
-  absl::flat_hash_set<CancelListener *> listeners;
+  absl::flat_hash_set<CancelListener*> listeners;
   {
     absl::MutexLock lock(*mutex_);
     if (cancelled_) {
@@ -53,8 +55,23 @@ void CancellationFlag::Cancel() {
     listeners = listeners_;
   }
 
-  for (auto *listener : listeners) {
+  // Invoke listeners outside the lock so callbacks can query Cancelled(),
+  // re-enter Cancel(), or acquire external locks without lock-order inversion.
+  // Track `active_listener_` so UnregisterOnCancelListener() on another
+  // thread waits if that specific listener is currently executing.
+  for (CancelListener* listener : listeners) {
+    {
+      absl::MutexLock lock(*mutex_);
+      if (!listeners_.contains(listener)) {
+        continue;
+      }
+      active_listener_ = listener;
+    }
     (*listener)();
+    {
+      absl::MutexLock lock(*mutex_);
+      active_listener_ = nullptr;
+    }
   }
 }
 
@@ -89,9 +106,25 @@ void CancellationFlag::RegisterOnCancelListener(CancelListener *listener) {
 }
 
 void CancellationFlag::UnregisterOnCancelListener(CancelListener *listener) {
+  if (listener == nullptr) {
+    return;
+  }
   absl::MutexLock lock(*mutex_);
 
   listeners_.erase(listener);
+  // If `listener` is currently executing on another thread inside `Cancel()`,
+  // wait for it to finish before returning so `~CancellationFlagListener()`
+  // does not destroy `listener_` while `(*listener)()` is still running.
+  // A listener callback must not destroy its own `CancellationFlagListener`
+  // synchronously from inside its own invocation, as that would destroy the
+  // executing `absl::AnyInvocable` while still on the call stack.
+  if (active_listener_ == listener) {
+    auto is_listener_inactive =
+        [this, listener]() ABSL_SHARED_LOCKS_REQUIRED(*mutex_) {
+          return active_listener_ != listener;
+        };
+    mutex_->Await(absl::Condition(&is_listener_inactive));
+  }
 }
 
 }  // namespace nearby

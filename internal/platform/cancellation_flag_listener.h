@@ -21,6 +21,8 @@ namespace nearby {
 
 // An RAII mechanism to register CancelListener over a life cycle of medium
 // class.
+// Note: A `CancellationFlagListener` must not be destroyed synchronously from
+// within its own `CancelListener` callback during `CancellationFlag::Cancel()`.
 class CancellationFlagListener {
  public:
   CancellationFlagListener(CancellationFlag* flag,
@@ -29,6 +31,9 @@ class CancellationFlagListener {
     flag_->RegisterOnCancelListener(&listener_);
   }
 
+  // Unregisters the listener and blocks if the callback is currently executing
+  // on another thread. Must not be invoked synchronously from within
+  // `listener_` itself.
   ~CancellationFlagListener() { flag_->UnregisterOnCancelListener(&listener_); }
 
  private:
