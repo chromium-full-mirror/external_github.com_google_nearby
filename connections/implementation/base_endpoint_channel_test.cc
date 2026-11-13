@@ -497,6 +497,10 @@ TEST_F(BaseEndpointChannelTest, ReadAfterInputStreamClosed) {
 }
 
 TEST_F(BaseEndpointChannelTest, ReadUnencryptedFrameOnEncryptedChannel) {
+  NearbyFlags::GetInstance().OverrideBoolFlagValue(
+      config_package_nearby::nearby_connections_feature::
+          kEnforceStrictUnencryptedFrameCheck,
+      false);
   // Setup test communication environment.
   auto pipe_a = CreatePipe();  // channel_a writes to pipe_a, reads from pipe_b.
   auto pipe_b = CreatePipe();  // channel_b writes to pipe_b, reads from pipe_a.
@@ -529,6 +533,16 @@ TEST_F(BaseEndpointChannelTest, ReadUnencryptedFrameOnEncryptedChannel) {
   EXPECT_TRUE(result.ok());
   EXPECT_EQ(result.result().AsStringView(), keep_alive_message);
 
+  // When strict unencrypted frame checking is disabled, legacy behavior allows
+  // unencrypted DISCONNECTION frames.
+  std::string disconnection_message =
+      parser::ForDisconnection(/*request_safe_to_disconnect=*/false,
+                               /*ack_safe_to_disconnect=*/false);
+  channel_a->Write(disconnection_message);
+  result = channel_b->Read();
+  EXPECT_TRUE(result.ok());
+  EXPECT_EQ(result.result().AsStringView(), disconnection_message);
+
   // An unencrypted data frame should fail.
   absl::string_view tx_message = "data message";
   channel_a->Write(tx_message);
@@ -537,6 +551,99 @@ TEST_F(BaseEndpointChannelTest, ReadUnencryptedFrameOnEncryptedChannel) {
   EXPECT_EQ(result.exception(), Exception::kInvalidProtocolBuffer);
 
   // Shutdown test environment.
+  channel_a->Close(DisconnectionReason::LOCAL_DISCONNECTION);
+  channel_b->Close(DisconnectionReason::REMOTE_DISCONNECTION);
+}
+
+TEST_F(BaseEndpointChannelTest,
+       ReadRejectsUnencryptedDisconnectionOnEncryptedChannel) {
+  NearbyFlags::GetInstance().OverrideBoolFlagValue(
+      config_package_nearby::nearby_connections_feature::
+          kEnforceStrictUnencryptedFrameCheck,
+      true);
+  NearbyFlags::GetInstance().OverrideInt64FlagValue(
+      config_package_nearby::nearby_connections_feature::
+          kUnencryptedKeepAliveGracePeriodMillis,
+      5000);
+
+  auto pipe_a = CreatePipe();
+  auto pipe_b = CreatePipe();
+  auto channel_a = std::make_shared<TestEndpointChannel>(pipe_b.first.get(),
+                                                         pipe_a.second.get());
+  auto channel_b = std::make_shared<TestEndpointChannel>(pipe_a.first.get(),
+                                                         pipe_b.second.get());
+
+  ON_CALL(*channel_a, GetMedium).WillByDefault([]() {
+    return Medium::BLUETOOTH;
+  });
+  ON_CALL(*channel_b, GetMedium).WillByDefault([]() {
+    return Medium::BLUETOOTH;
+  });
+
+  auto [context_a, context_b] = DoDhKeyExchange(channel_a, channel_b);
+  ASSERT_NE(context_a, nullptr);
+  ASSERT_NE(context_b, nullptr);
+  channel_b->EnableEncryption(context_b);
+
+  // An unencrypted KEEP_ALIVE within the grace period is still accepted.
+  std::string keep_alive_message = parser::ForKeepAlive();
+  channel_a->Write(keep_alive_message);
+  ExceptionOr<ByteArray> keep_alive_result = channel_b->Read();
+  EXPECT_TRUE(keep_alive_result.ok());
+  EXPECT_EQ(keep_alive_result.result().AsStringView(), keep_alive_message);
+
+  // An injected unencrypted DISCONNECTION frame on an encrypted channel must be
+  // rejected rather than tearing down the session without AEAD authentication.
+  std::string disconnection_message =
+      parser::ForDisconnection(/*request_safe_to_disconnect=*/false,
+                               /*ack_safe_to_disconnect=*/false);
+  channel_a->Write(disconnection_message);
+  ExceptionOr<ByteArray> result = channel_b->Read();
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.exception(), Exception::kInvalidProtocolBuffer);
+
+  channel_a->Close(DisconnectionReason::LOCAL_DISCONNECTION);
+  channel_b->Close(DisconnectionReason::REMOTE_DISCONNECTION);
+}
+
+TEST_F(BaseEndpointChannelTest,
+       ReadRejectsUnencryptedKeepAliveAfterGracePeriodOnEncryptedChannel) {
+  NearbyFlags::GetInstance().OverrideBoolFlagValue(
+      config_package_nearby::nearby_connections_feature::
+          kEnforceStrictUnencryptedFrameCheck,
+      true);
+  NearbyFlags::GetInstance().OverrideInt64FlagValue(
+      config_package_nearby::nearby_connections_feature::
+          kUnencryptedKeepAliveGracePeriodMillis,
+      10);
+
+  auto pipe_a = CreatePipe();
+  auto pipe_b = CreatePipe();
+  auto channel_a = std::make_shared<TestEndpointChannel>(pipe_b.first.get(),
+                                                         pipe_a.second.get());
+  auto channel_b = std::make_shared<TestEndpointChannel>(pipe_a.first.get(),
+                                                         pipe_b.second.get());
+
+  ON_CALL(*channel_a, GetMedium).WillByDefault([]() {
+    return Medium::BLUETOOTH;
+  });
+  ON_CALL(*channel_b, GetMedium).WillByDefault([]() {
+    return Medium::BLUETOOTH;
+  });
+
+  auto [context_a, context_b] = DoDhKeyExchange(channel_a, channel_b);
+  ASSERT_NE(context_a, nullptr);
+  ASSERT_NE(context_b, nullptr);
+  channel_b->EnableEncryption(context_b);
+
+  absl::SleepFor(absl::Milliseconds(25));
+
+  std::string keep_alive_message = parser::ForKeepAlive();
+  channel_a->Write(keep_alive_message);
+  ExceptionOr<ByteArray> result = channel_b->Read();
+  EXPECT_FALSE(result.ok());
+  EXPECT_EQ(result.exception(), Exception::kInvalidProtocolBuffer);
+
   channel_a->Close(DisconnectionReason::LOCAL_DISCONNECTION);
   channel_b->Close(DisconnectionReason::REMOTE_DISCONNECTION);
 }
