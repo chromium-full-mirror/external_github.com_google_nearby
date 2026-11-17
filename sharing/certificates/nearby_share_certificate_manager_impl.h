@@ -230,6 +230,7 @@ class NearbyShareCertificateManagerImpl
       nearby_identity_client_;
   nearby::sharing::SyncManager& sync_manager_;
 
+  absl_nonnull std::unique_ptr<SingleThreadExecutor> executor_;
   std::shared_ptr<NearbyShareCertificateStorage> certificate_storage_;
   absl_nonnull std::unique_ptr<NearbyShareScheduler>
       private_certificate_expiration_scheduler_;
@@ -244,8 +245,6 @@ class NearbyShareCertificateManagerImpl
   // preferences.
   absl_nonnull std::unique_ptr<NearbyShareScheduler>
       account_info_update_scheduler_;
-
-  std::unique_ptr<SingleThreadExecutor> executor_;
   absl::Mutex join_time_mutex_;
   // Set to the transaction timestamp of the last successful pairing if
   // available.  This is returned from the phone in the BindingResponse message.

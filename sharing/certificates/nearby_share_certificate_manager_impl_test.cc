@@ -188,6 +188,7 @@ class NearbyShareCertificateManagerImplTest
     PopulatePrivateCertificates();
     PopulatePublicCertificates();
     cert_manager_->StartScheduledTasks();
+    Sync();
     EXPECT_TRUE(private_cert_exp_scheduler_->is_running());
     EXPECT_TRUE(public_cert_exp_scheduler_->is_running());
     EXPECT_TRUE(upload_scheduler_->is_running());
@@ -1160,6 +1161,7 @@ TEST_F(NearbyShareCertificateManagerImplTest,
   Initialize();
 
   cert_manager_->DownloadPublicCertificates();
+  Sync();
 
   EXPECT_EQ(download_scheduler_->num_immediate_requests(), 1);
 }
@@ -1167,6 +1169,7 @@ TEST_F(NearbyShareCertificateManagerImplTest,
 TEST_F(NearbyShareCertificateManagerImplTest, StopScheduledTasks) {
   Initialize();
   cert_manager_->StopScheduledTasks();
+  Sync();
   EXPECT_FALSE(private_cert_exp_scheduler_->is_running());
   EXPECT_FALSE(public_cert_exp_scheduler_->is_running());
   EXPECT_FALSE(upload_scheduler_->is_running());
