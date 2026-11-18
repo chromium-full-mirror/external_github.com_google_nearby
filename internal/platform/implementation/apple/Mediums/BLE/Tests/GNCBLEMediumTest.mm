@@ -23,6 +23,7 @@
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCBLEGATTServer.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCPeripheral.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/Tests/GNCBLEL2CAPClient+Testing.h"
+#import "internal/platform/implementation/apple/Mediums/BLE/Tests/GNCBLEL2CAPFakeInputOutputStream.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/Tests/GNCBLEMedium+Testing.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/Tests/GNCFakeCentralManager.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/Tests/GNCFakePeripheral.h"
@@ -692,6 +693,102 @@ static NSString *const kServiceUUID = @"0000FEF3-0000-1000-8000-00805F9B34FB";
         [medium retrievePeripheralWithIdentifier:
                     [[NSUUID alloc] initWithUUIDString:@"11111111-1111-1111-1111-111111111112"]]);
   }
+}
+
+- (void)testOpeningL2CAPDoesNotBlockGATTCharacteristicDiscovery {
+  GNCFakeCentralManager *fakeCentralManager = [[GNCFakeCentralManager alloc] init];
+  GNCFakePeripheralManager *fakePeripheralManager = [[GNCFakePeripheralManager alloc] init];
+  GNCBLEMedium *medium = [[GNCBLEMedium alloc] initWithCentralManager:fakeCentralManager
+                                                    peripheralManager:fakePeripheralManager
+                                                                queue:dispatch_get_main_queue()];
+  GNCFakePeripheral *peripheral = [[GNCFakePeripheral alloc] init];
+
+  __block GNCBLEGATTClient *gattClient = nil;
+  XCTestExpectation *gattExpectation =
+      [[XCTestExpectation alloc] initWithDescription:@"GATT connected"];
+  [medium connectToGATTServerForPeripheral:peripheral
+                      disconnectionHandler:nil
+                         completionHandler:^(GNCBLEGATTClient *client, NSError *error) {
+                           XCTAssertNil(error);
+                           gattClient = client;
+                           [gattExpectation fulfill];
+                         }];
+  [self waitForExpectations:@[ gattExpectation ] timeout:3];
+  XCTAssertNotNil(gattClient);
+
+  // Delay peripheral delegate callbacks so L2CAP opens while GATT discovery is in flight.
+  peripheral.delegateDelay = 0.05;
+  CBUUID *serviceUUID = [CBUUID UUIDWithString:kServiceUUID];
+  CBUUID *characteristicUUID = [CBUUID UUIDWithString:@"0000FEF4-0000-1000-8000-00805F9B34FB"];
+  XCTestExpectation *discoverExpectation =
+      [[XCTestExpectation alloc] initWithDescription:@"GATT discovery completed"];
+  [gattClient discoverCharacteristicsWithUUIDs:@[ characteristicUUID ]
+                                   serviceUUID:serviceUUID
+                             completionHandler:^(NSError *error) {
+                               XCTAssertNil(error);
+                               [discoverExpectation fulfill];
+                             }];
+
+  XCTestExpectation *l2capExpectation =
+      [[XCTestExpectation alloc] initWithDescription:@"L2CAP opened"];
+  [medium openL2CAPChannelWithPSM:123
+                       peripheral:peripheral
+                completionHandler:^(GNCBLEL2CAPStream *_Nullable stream, NSError *_Nullable error) {
+                  XCTAssertNil(error);
+                  [l2capExpectation fulfill];
+                }];
+
+  [self waitForExpectations:@[ discoverExpectation, l2capExpectation ] timeout:3];
+}
+
+- (void)testL2CAPCloseCancelsReportedPeripheralNotFirstPeripheral {
+  GNCFakeCentralManager *fakeCentralManager = [[GNCFakeCentralManager alloc] init];
+  GNCFakePeripheralManager *fakePeripheralManager = [[GNCFakePeripheralManager alloc] init];
+  GNCBLEMedium *medium = [[GNCBLEMedium alloc] initWithCentralManager:fakeCentralManager
+                                                    peripheralManager:fakePeripheralManager
+                                                                queue:dispatch_get_main_queue()];
+
+  GNCFakePeripheral *peripheral1 = [[GNCFakePeripheral alloc] init];
+  GNCBLEL2CAPFakeInputOutputStream *fakeStreams1 =
+      [[GNCBLEL2CAPFakeInputOutputStream alloc] initWithBufferSize:1];
+  peripheral1.channelInputStream = fakeStreams1.inputStream;
+  peripheral1.channelOutputStream = fakeStreams1.outputStream;
+
+  GNCFakePeripheral *peripheral2 = [[GNCFakePeripheral alloc] init];
+  GNCBLEL2CAPFakeInputOutputStream *fakeStreams2 =
+      [[GNCBLEL2CAPFakeInputOutputStream alloc] initWithBufferSize:1];
+  peripheral2.channelInputStream = fakeStreams2.inputStream;
+  peripheral2.channelOutputStream = fakeStreams2.outputStream;
+
+  XCTestExpectation *open1 = [[XCTestExpectation alloc] initWithDescription:@"Open 1"];
+  [medium openL2CAPChannelWithPSM:123
+                       peripheral:peripheral1
+                completionHandler:^(GNCBLEL2CAPStream *_Nullable stream, NSError *_Nullable error) {
+                  XCTAssertNotNil(stream);
+                  [open1 fulfill];
+                }];
+  [self waitForExpectations:@[ open1 ] timeout:3];
+
+  __block GNCBLEL2CAPStream *stream2 = nil;
+  XCTestExpectation *open2 = [[XCTestExpectation alloc] initWithDescription:@"Open 2"];
+  [medium openL2CAPChannelWithPSM:123
+                       peripheral:peripheral2
+                completionHandler:^(GNCBLEL2CAPStream *_Nullable stream, NSError *_Nullable error) {
+                  XCTAssertNotNil(stream);
+                  stream2 = stream;
+                  [open2 fulfill];
+                }];
+  [self waitForExpectations:@[ open2 ] timeout:3];
+
+  [stream2 close];
+  XCTestExpectation *drainExpectation = [[XCTestExpectation alloc] initWithDescription:@"Drain"];
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   [drainExpectation fulfill];
+                 });
+  [self waitForExpectations:@[ drainExpectation ] timeout:3];
+  XCTAssertEqual(fakeCentralManager.canceledPeripherals.count, 1u);
+  XCTAssertEqual(fakeCentralManager.canceledPeripherals.firstObject, peripheral2);
 }
 
 @end
