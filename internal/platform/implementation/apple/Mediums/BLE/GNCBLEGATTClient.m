@@ -21,6 +21,7 @@
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCBLEError.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCBLEGATTCharacteristic.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCPeripheral.h"
+#import "internal/platform/implementation/apple/Mediums/BLE/GNCPeripheralDelegateMultiplexer.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -211,7 +212,11 @@ static NSError *InvalidServiceDataError() {
     _queue = queue ?: dispatch_get_main_queue();
     _peripheral = peripheral;
     _semaphore = nil;
-    _peripheral.peripheralDelegate = self;
+    if ([_peripheral.peripheralDelegate isKindOfClass:[GNCPeripheralDelegateMultiplexer class]]) {
+      [(GNCPeripheralDelegateMultiplexer *)_peripheral.peripheralDelegate addListener:self];
+    } else {
+      _peripheral.peripheralDelegate = self;
+    }
     _currentDiscoverCharacteristicsRequest = nil;
     _currentReadCharacteristicValueRequest = nil;
     _requestDisconnectionHandler = requestDisconnectionHandler;
@@ -313,6 +318,9 @@ static NSError *InvalidServiceDataError() {
 
 - (void)disconnect {
   dispatch_async(_queue, ^{
+    if ([_peripheral.peripheralDelegate isKindOfClass:[GNCPeripheralDelegateMultiplexer class]]) {
+      [(GNCPeripheralDelegateMultiplexer *)_peripheral.peripheralDelegate removeListener:self];
+    }
     if (_requestDisconnectionHandler) {
       _requestDisconnectionHandler(_peripheral);
     }
