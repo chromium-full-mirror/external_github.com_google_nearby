@@ -21,6 +21,7 @@
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCBLEError.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCBLEL2CAPStream.h"
 #import "internal/platform/implementation/apple/Mediums/BLE/GNCPeripheral.h"
+#import "internal/platform/implementation/apple/Mediums/BLE/GNCPeripheralDelegateMultiplexer.h"
 
 static char *const kGNCBLEL2CAPClientQueueLabel = "com.google.nearby.GNCBLEL2CAPClient";
 
@@ -61,7 +62,11 @@ static char *const kGNCBLEL2CAPClientQueueLabel = "com.google.nearby.GNCBLEL2CAP
               completionHandler:(GNCOpenL2CAPStreamCompletionHandler)completionHandler {
   GNCLoggerInfo(@"[NEARBY] openL2CAPChannelWithPSM = %d", PSM);
   _peripheral = peripheral;
-  _peripheral.peripheralDelegate = self;
+  if ([_peripheral.peripheralDelegate isKindOfClass:[GNCPeripheralDelegateMultiplexer class]]) {
+    [(GNCPeripheralDelegateMultiplexer *)_peripheral.peripheralDelegate addListener:self];
+  } else {
+    _peripheral.peripheralDelegate = self;
+  }
   _completionHandler = [completionHandler copy];
   [_peripheral openL2CAPChannel:(CBL2CAPPSM)PSM];
 }
@@ -69,9 +74,12 @@ static char *const kGNCBLEL2CAPClientQueueLabel = "com.google.nearby.GNCBLEL2CAP
 - (void)disconnect {
   dispatch_async(_queue, ^{
     id<GNCPeripheral> localPeripheral = _peripheral;
-    _requestDisconnectionHandler(localPeripheral);
+    if ([localPeripheral.peripheralDelegate
+            isKindOfClass:[GNCPeripheralDelegateMultiplexer class]]) {
+      [(GNCPeripheralDelegateMultiplexer *)localPeripheral.peripheralDelegate removeListener:self];
+    }
     _peripheral = nil;
-    _peripheral.peripheralDelegate = nil;
+    _requestDisconnectionHandler(localPeripheral);
   });
 }
 
@@ -81,6 +89,9 @@ static char *const kGNCBLEL2CAPClientQueueLabel = "com.google.nearby.GNCBLEL2CAP
     didOpenL2CAPChannel:(CBL2CAPChannel *)channel
                   error:(NSError *)error {
   dispatch_assert_queue(_queue);
+  if (_peripheral && ![peripheral.identifier isEqual:_peripheral.identifier]) {
+    return;
+  }
   GNCLoggerDebug(
       @"[NEARBY] didOpenL2CAPChannel, channel: %@, inputStream: %@, outputStream: %@, error: %@",
       channel, channel.inputStream, channel.outputStream, error);
